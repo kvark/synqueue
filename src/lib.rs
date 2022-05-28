@@ -37,7 +37,24 @@ impl State {
     }
 }
 
-/// Fast MPMC queue.
+/// Fast internally syncrhonized MPMC queue.
+///
+/// ## Principle
+/// The basic problem with MPMC queues on arrays is synchronizing
+/// access to data with shifting of head/tail pointers.
+/// To address this, a general solution (you can find in `crossbeam-queue` and others)
+/// is to add one atomic bit per element, which serves as a barrier for advancing
+/// the queue pointers.
+///
+/// `SynQueue` tries a different approach. There is no extra bits.
+/// Instead, we are keeping 2 representations of the queue state: wide and narrow.
+/// Pushing advances `wide.head`, writes the data, and then makes `narrow.head` to catch up.
+/// Popping advances `narrow.tail`, reads the data, and then makes `wide.tail` to catch up.
+/// Every operation is thus sequence of CAS loop, data operation, another CAS loop.
+///
+/// ## Internal invariants.
+/// Considering an infinite sequence (without wraparounds):
+///  `wide.tail <= narrow.tail <= narrow.head <= wide.head`
 pub struct SynQueue<T> {
     wide: AtomicUsize,
     narrow: AtomicUsize,
