@@ -14,26 +14,26 @@ use std::{
 
 const CAS_ORDER: Ordering = Ordering::AcqRel;
 const LOAD_ORDER: Ordering = Ordering::Acquire;
-const HEAD_BITS: usize = 32;
-const HEAD_MASK: usize = (1 << HEAD_BITS) - 1;
-const _BITS_CHECK: usize = (mem::size_of::<usize>() * 8 == HEAD_BITS * 2) as usize - 1;
+type Pointer = u32;
+const _BITS_CHECK: usize = (mem::size_of::<usize>() == 2 * mem::size_of::<Pointer>()) as usize - 1;
 
-/*
-struct Snake {
-    head: u32,
-    tail: u32,
+#[derive(Clone, Copy, Debug)]
+struct State {
+    head: Pointer,
+    tail: Pointer,
 }
-fn Snake {
+impl State {
+    const HEAD_BITS: usize = mem::size_of::<Pointer>() * 8;
     fn unpack(raw: usize) -> Self {
         Self {
-            head: state as u32,
-            tail: (state >> HEAD_BITS) as u32,
+            head: raw as Pointer,
+            tail: (raw >> Self::HEAD_BITS) as Pointer,
         }
     }
     fn pack(self) -> usize {
-        (self.head as usize) | (self.tail as usize << HEAD_BITS)
+        (self.head as usize) | ((self.tail as usize) << Self::HEAD_BITS)
     }
-}*/
+}
 
 /// Fast MPMC queue.
 pub struct SynQueue<T> {
@@ -57,7 +57,7 @@ impl<T> SynQueue<T> {
         }
     }
 
-    fn advance(&self, index: usize) -> usize {
+    fn advance(&self, index: Pointer) -> Pointer {
         if index as usize + 1 == self.data.len() {
             0
         } else {
@@ -66,26 +66,27 @@ impl<T> SynQueue<T> {
     }
 
     pub fn push(&self, value: T) -> Result<(), T> {
-        // acqure a new position first
+        // acqure a new position within the wide state
         let mut state = self.wide.load(LOAD_ORDER);
         let (head, next) = loop {
             //println!("Push pre-CAS: {:x}", state);
-            let head = state & HEAD_MASK;
-            let tail = state >> HEAD_BITS;
-            let next = self.advance(head);
-            if next == tail {
+            let s = State::unpack(state);
+            let next = self.advance(s.head);
+            if next == s.tail {
                 return Err(value);
             }
             match self.wide.compare_exchange_weak(
                 state,
-                next | (tail << HEAD_BITS),
+                State { head: next, ..s }.pack(),
                 CAS_ORDER,
                 LOAD_ORDER,
             ) {
                 // write the value on success
                 Ok(_) => {
-                    unsafe { UnsafeCell::raw_get(self.data[head].as_ptr()).write(value) };
-                    break (head, next);
+                    unsafe {
+                        UnsafeCell::raw_get(self.data[s.head as usize].as_ptr()).write(value)
+                    };
+                    break (s.head, next);
                 }
                 Err(other) => {
                     state = other;
@@ -93,46 +94,44 @@ impl<T> SynQueue<T> {
             }
             hint::spin_loop();
         };
+
         // advance the narrow state
         state = self.narrow.load(LOAD_ORDER);
-        let mut tail_high = state & !HEAD_MASK;
+        let mut tail = State::unpack(state).tail;
         while let Err(other) = self.narrow.compare_exchange_weak(
-            tail_high | head,
-            tail_high | next,
+            State { head, tail }.pack(),
+            State { head: next, tail }.pack(),
             CAS_ORDER,
             LOAD_ORDER,
         ) {
             //println!("Push post-CAS: {:x}", other);
             hint::spin_loop();
-            tail_high = other & !HEAD_MASK;
+            tail = State::unpack(other).tail;
         }
         Ok(())
     }
 
     pub fn pop(&self) -> Option<T> {
+        // acquire the oldest position within the narrow state
         let mut state = self.narrow.load(LOAD_ORDER);
         let (value, tail, next) = loop {
             //println!("Pop pre-CAS: {:x}", state);
-            let head = state & HEAD_MASK;
-            let tail = state >> HEAD_BITS;
-            if head == tail {
+            let s = State::unpack(state);
+            if s.head == s.tail {
                 return None;
             }
-            let next = if tail + 1 == self.data.len() {
-                0
-            } else {
-                tail + 1
-            };
+            let next = self.advance(s.tail);
             match self.narrow.compare_exchange_weak(
                 state,
-                head | (next << HEAD_BITS),
+                State { tail: next, ..s }.pack(),
                 CAS_ORDER,
                 LOAD_ORDER,
             ) {
                 // extract the value on success
                 Ok(_) => {
-                    let value = unsafe { self.data[tail].assume_init_read().into_inner() };
-                    break (value, tail, next);
+                    let value =
+                        unsafe { self.data[s.tail as usize].assume_init_read().into_inner() };
+                    break (value, s.tail, next);
                 }
                 Err(other) => {
                     state = other;
@@ -140,18 +139,19 @@ impl<T> SynQueue<T> {
             }
             hint::spin_loop();
         };
+
         // advance the wide state
         state = self.wide.load(LOAD_ORDER);
-        let mut head = state & HEAD_MASK;
+        let mut head = State::unpack(state).head;
         while let Err(other) = self.wide.compare_exchange_weak(
-            head | (tail << HEAD_BITS),
-            head | (next << HEAD_BITS),
+            State { head, tail }.pack(),
+            State { head, tail: next }.pack(),
             CAS_ORDER,
             LOAD_ORDER,
         ) {
             //println!("Pop post-CAS: {:x}", other);
             hint::spin_loop();
-            head = other & HEAD_MASK;
+            head = State::unpack(other).head;
         }
         Some(value)
     }
@@ -162,14 +162,11 @@ impl<T> Drop for SynQueue<T> {
         let state = self.wide.load(LOAD_ORDER);
         //println!("Drop state: {:x}", state);
         assert_eq!(state, self.narrow.load(LOAD_ORDER));
-        let head = state & HEAD_MASK;
-        let mut tail = state >> HEAD_BITS;
-        while tail != head {
-            unsafe { self.data[tail].assume_init_drop() };
-            tail += 1;
-            if tail == self.data.len() {
-                tail = 0;
-            }
+        let s = State::unpack(state);
+        let mut cursor = s.tail;
+        while cursor != s.head {
+            unsafe { self.data[cursor as usize].assume_init_drop() };
+            cursor = self.advance(cursor);
         }
     }
 }
