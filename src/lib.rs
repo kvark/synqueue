@@ -177,8 +177,8 @@ fn barrage() {
     use std::{sync::Arc, thread};
 
     loom::model(|| {
-        const NUM_THREADS: usize = 8;
-        const NUM_ELEMENTS: usize = 10000;
+        const NUM_THREADS: usize = if cfg!(miri) { 2 } else { 8 };
+        const NUM_ELEMENTS: usize = if cfg!(miri) { 100 } else { 10000 };
         let sq = Arc::new(SynQueue::<usize>::new(NUM_ELEMENTS));
         let mut handles = Vec::new();
 
