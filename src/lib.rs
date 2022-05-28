@@ -1,6 +1,14 @@
+use std::mem::MaybeUninit;
+#[cfg(not(feature = "loom"))]
 use std::{
     cell::UnsafeCell,
-    hint, mem,
+    hint,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+#[cfg(feature = "loom")]
+use std::{
+    cell::UnsafeCell,
+    hint,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -8,7 +16,7 @@ use std::{
 pub struct SynQueue<T> {
     m1: AtomicUsize,
     m2: AtomicUsize,
-    data: Box<[mem::MaybeUninit<UnsafeCell<T>>]>,
+    data: Box<[MaybeUninit<UnsafeCell<T>>]>,
 }
 
 impl<T> SynQueue<T> {
@@ -20,7 +28,7 @@ impl<T> SynQueue<T> {
             m2: AtomicUsize::new(0),
             /// In order to differentiate between empty and full states, we
             /// are never going to use the full array, so get one extra element.
-            data: (0..=capacity).map(|_| mem::MaybeUninit::uninit()).collect(),
+            data: (0..=capacity).map(|_| MaybeUninit::uninit()).collect(),
         }
     }
 
@@ -131,19 +139,30 @@ impl<T> Drop for SynQueue<T> {
     }
 }
 
+#[cfg(all(test, not(feature = "loom")))]
+mod loom {
+    pub fn model(mut fun: impl FnMut()) {
+        fun();
+    }
+}
+
 #[test]
 fn overflow() {
-    let sq = SynQueue::<i32>::new(1);
-    sq.push(2).unwrap();
-    assert_eq!(sq.push(3), Err(3));
+    loom::model(|| {
+        let sq = SynQueue::<i32>::new(1);
+        sq.push(2).unwrap();
+        assert_eq!(sq.push(3), Err(3));
+    })
 }
 
 #[test]
 fn smoke_test() {
-    let sq = SynQueue::<i32>::new(10);
-    assert_eq!(sq.pop(), None);
-    sq.push(5).unwrap();
-    sq.push(10).unwrap();
-    assert_eq!(sq.pop(), Some(5));
-    assert_eq!(sq.pop(), Some(10));
+    loom::model(|| {
+        let sq = SynQueue::<i32>::new(10);
+        assert_eq!(sq.pop(), None);
+        sq.push(5).unwrap();
+        sq.push(10).unwrap();
+        assert_eq!(sq.pop(), Some(5));
+        assert_eq!(sq.pop(), Some(10));
+    })
 }
