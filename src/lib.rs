@@ -19,6 +19,8 @@ pub struct SynQueue<T> {
     data: Box<[MaybeUninit<UnsafeCell<T>>]>,
 }
 
+unsafe impl<T> Sync for SynQueue<T> {}
+
 impl<T> SynQueue<T> {
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -156,7 +158,7 @@ fn overflow() {
 }
 
 #[test]
-fn smoke_test() {
+fn smoke() {
     loom::model(|| {
         let sq = SynQueue::<i32>::new(10);
         assert_eq!(sq.pop(), None);
@@ -164,5 +166,41 @@ fn smoke_test() {
         sq.push(10).unwrap();
         assert_eq!(sq.pop(), Some(5));
         assert_eq!(sq.pop(), Some(10));
+    })
+}
+
+#[test]
+fn barrage() {
+    #[cfg(feature = "loom")]
+    use loom::{sync::Arc, thread};
+    #[cfg(not(feature = "loom"))]
+    use std::{sync::Arc, thread};
+
+    loom::model(|| {
+        const NUM_THREADS: usize = 8;
+        const NUM_ELEMENTS: usize = 10000;
+        let sq = Arc::new(SynQueue::<usize>::new(NUM_ELEMENTS));
+        let mut handles = Vec::new();
+
+        for _ in 0..NUM_THREADS {
+            let sq2 = Arc::clone(&sq);
+            handles.push(thread::spawn(move || {
+                for i in 0..NUM_ELEMENTS {
+                    let _ = sq2.push(i);
+                }
+            }));
+        }
+        for _ in 0..NUM_THREADS {
+            let sq3 = Arc::clone(&sq);
+            handles.push(thread::spawn(move || {
+                for _ in 0..NUM_ELEMENTS {
+                    let _ = sq3.pop();
+                }
+            }));
+        }
+
+        for jt in handles {
+            let _ = jt.join();
+        }
     })
 }
