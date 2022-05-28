@@ -1,4 +1,4 @@
-use std::mem::MaybeUninit;
+use std::mem;
 #[cfg(not(feature = "loom"))]
 use std::{
     cell::UnsafeCell,
@@ -12,11 +12,34 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+const CAS_ORDER: Ordering = Ordering::AcqRel;
+const LOAD_ORDER: Ordering = Ordering::Acquire;
+const HEAD_BITS: usize = 32;
+const HEAD_MASK: usize = (1 << HEAD_BITS) - 1;
+const _BITS_CHECK: usize = (mem::size_of::<usize>() * 8 == HEAD_BITS * 2) as usize - 1;
+
+/*
+struct Snake {
+    head: u32,
+    tail: u32,
+}
+fn Snake {
+    fn unpack(raw: usize) -> Self {
+        Self {
+            head: state as u32,
+            tail: (state >> HEAD_BITS) as u32,
+        }
+    }
+    fn pack(self) -> usize {
+        (self.head as usize) | (self.tail as usize << HEAD_BITS)
+    }
+}*/
+
 /// Fast MPMC queue.
 pub struct SynQueue<T> {
-    m1: AtomicUsize,
-    m2: AtomicUsize,
-    data: Box<[MaybeUninit<UnsafeCell<T>>]>,
+    wide: AtomicUsize,
+    narrow: AtomicUsize,
+    data: Box<[mem::MaybeUninit<UnsafeCell<T>>]>,
 }
 
 unsafe impl<T> Sync for SynQueue<T> {}
@@ -25,39 +48,44 @@ impl<T> SynQueue<T> {
     pub fn new(capacity: usize) -> Self {
         Self {
             /// State used first on push, last on pop.
-            m1: AtomicUsize::new(0),
+            wide: AtomicUsize::new(0),
             /// State used first on pop, last on push.
-            m2: AtomicUsize::new(0),
+            narrow: AtomicUsize::new(0),
             /// In order to differentiate between empty and full states, we
             /// are never going to use the full array, so get one extra element.
-            data: (0..=capacity).map(|_| MaybeUninit::uninit()).collect(),
+            data: (0..=capacity).map(|_| mem::MaybeUninit::uninit()).collect(),
+        }
+    }
+
+    fn advance(&self, index: usize) -> usize {
+        if index as usize + 1 == self.data.len() {
+            0
+        } else {
+            index + 1
         }
     }
 
     pub fn push(&self, value: T) -> Result<(), T> {
         // acqure a new position first
-        let mut state = self.m1.load(Ordering::Acquire);
-        let head = loop {
-            let head = state & 0xFFFFFFFF;
-            let tail = state >> 32;
-            let next = if head + 1 == self.data.len() {
-                0
-            } else {
-                head + 1
-            };
+        let mut state = self.wide.load(LOAD_ORDER);
+        let (head, next) = loop {
+            //println!("Push pre-CAS: {:x}", state);
+            let head = state & HEAD_MASK;
+            let tail = state >> HEAD_BITS;
+            let next = self.advance(head);
             if next == tail {
                 return Err(value);
             }
-            match self.m1.compare_exchange_weak(
+            match self.wide.compare_exchange_weak(
                 state,
-                next | (tail << 32),
-                Ordering::AcqRel,
-                Ordering::Acquire,
+                next | (tail << HEAD_BITS),
+                CAS_ORDER,
+                LOAD_ORDER,
             ) {
                 // write the value on success
                 Ok(_) => {
                     unsafe { UnsafeCell::raw_get(self.data[head].as_ptr()).write(value) };
-                    break next;
+                    break (head, next);
                 }
                 Err(other) => {
                     state = other;
@@ -65,25 +93,28 @@ impl<T> SynQueue<T> {
             }
             hint::spin_loop();
         };
-        // advance the secondary state
-        state = self.m2.load(Ordering::Acquire);
-        while let Err(other) = self.m2.compare_exchange_weak(
-            state,
-            (state & !0xFFFFFFFF) | head,
-            Ordering::AcqRel,
-            Ordering::Acquire,
+        // advance the narrow state
+        state = self.narrow.load(LOAD_ORDER);
+        let mut tail_high = state & !HEAD_MASK;
+        while let Err(other) = self.narrow.compare_exchange_weak(
+            tail_high | head,
+            tail_high | next,
+            CAS_ORDER,
+            LOAD_ORDER,
         ) {
+            //println!("Push post-CAS: {:x}", other);
             hint::spin_loop();
-            state = other;
+            tail_high = other & !HEAD_MASK;
         }
         Ok(())
     }
 
     pub fn pop(&self) -> Option<T> {
-        let mut state = self.m2.load(Ordering::Acquire);
-        let (value, tail) = loop {
-            let head = state & 0xFFFFFFFF;
-            let tail = state >> 32;
+        let mut state = self.narrow.load(LOAD_ORDER);
+        let (value, tail, next) = loop {
+            //println!("Pop pre-CAS: {:x}", state);
+            let head = state & HEAD_MASK;
+            let tail = state >> HEAD_BITS;
             if head == tail {
                 return None;
             }
@@ -92,16 +123,16 @@ impl<T> SynQueue<T> {
             } else {
                 tail + 1
             };
-            match self.m2.compare_exchange_weak(
+            match self.narrow.compare_exchange_weak(
                 state,
-                head | (next << 32),
-                Ordering::AcqRel,
-                Ordering::Acquire,
+                head | (next << HEAD_BITS),
+                CAS_ORDER,
+                LOAD_ORDER,
             ) {
                 // extract the value on success
                 Ok(_) => {
                     let value = unsafe { self.data[tail].assume_init_read().into_inner() };
-                    break (value, next);
+                    break (value, tail, next);
                 }
                 Err(other) => {
                     state = other;
@@ -109,16 +140,18 @@ impl<T> SynQueue<T> {
             }
             hint::spin_loop();
         };
-        // advance the primary state
-        state = self.m1.load(Ordering::Acquire);
-        while let Err(other) = self.m1.compare_exchange_weak(
-            state,
-            (state & 0xFFFFFFFF) | (tail << 32),
-            Ordering::AcqRel,
-            Ordering::Acquire,
+        // advance the wide state
+        state = self.wide.load(LOAD_ORDER);
+        let mut head = state & HEAD_MASK;
+        while let Err(other) = self.wide.compare_exchange_weak(
+            head | (tail << HEAD_BITS),
+            head | (next << HEAD_BITS),
+            CAS_ORDER,
+            LOAD_ORDER,
         ) {
+            //println!("Pop post-CAS: {:x}", other);
             hint::spin_loop();
-            state = other;
+            head = other & HEAD_MASK;
         }
         Some(value)
     }
@@ -126,20 +159,17 @@ impl<T> SynQueue<T> {
 
 impl<T> Drop for SynQueue<T> {
     fn drop(&mut self) {
-        let mut state = self.m1.load(Ordering::Acquire);
-        while state != self.m2.load(Ordering::Acquire) {
-            hint::spin_loop();
-            state = self.m1.load(Ordering::Acquire);
-        }
-        let head = state & 0xFFFFFFFF;
-        let mut tail = state >> 32;
+        let state = self.wide.load(LOAD_ORDER);
+        //println!("Drop state: {:x}", state);
+        assert_eq!(state, self.narrow.load(LOAD_ORDER));
+        let head = state & HEAD_MASK;
+        let mut tail = state >> HEAD_BITS;
         while tail != head {
             unsafe { self.data[tail].assume_init_drop() };
-            if tail + 1 == self.data.len() {
+            tail += 1;
+            if tail == self.data.len() {
                 tail = 0;
-            } else {
-                tail += 1;
-            };
+            }
         }
     }
 }
