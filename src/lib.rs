@@ -126,8 +126,11 @@ impl<T> SynQueue<T> {
 
 impl<T> Drop for SynQueue<T> {
     fn drop(&mut self) {
-        let state = self.m1.load(Ordering::Acquire);
-        assert_eq!(state, self.m2.load(Ordering::Acquire));
+        let mut state = self.m1.load(Ordering::Acquire);
+        while state != self.m2.load(Ordering::Acquire) {
+            hint::spin_loop();
+            state = self.m1.load(Ordering::Acquire);
+        }
         let head = state & 0xFFFFFFFF;
         let mut tail = state >> 32;
         while tail != head {
