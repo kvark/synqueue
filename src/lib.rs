@@ -24,12 +24,14 @@ struct State {
 }
 impl State {
     const HEAD_BITS: usize = mem::size_of::<Pointer>() * 8;
+    #[inline(always)]
     fn unpack(raw: usize) -> Self {
         Self {
             head: raw as Pointer,
             tail: (raw >> Self::HEAD_BITS) as Pointer,
         }
     }
+    #[inline(always)]
     fn pack(self) -> usize {
         (self.head as usize) | ((self.tail as usize) << Self::HEAD_BITS)
     }
@@ -81,19 +83,14 @@ impl<T> SynQueue<T> {
                 CAS_ORDER,
                 LOAD_ORDER,
             ) {
-                // write the value on success
-                Ok(_) => {
-                    unsafe {
-                        UnsafeCell::raw_get(self.data[s.head as usize].as_ptr()).write(value)
-                    };
-                    break (s.head, next);
-                }
-                Err(other) => {
-                    state = other;
-                }
+                Ok(_) => break (s.head, next),
+                Err(other) => state = other,
             }
             hint::spin_loop();
         };
+
+        // write the data
+        unsafe { UnsafeCell::raw_get(self.data[head as usize].as_ptr()).write(value) };
 
         // advance the narrow state
         state = self.narrow.load(LOAD_ORDER);
@@ -114,7 +111,7 @@ impl<T> SynQueue<T> {
     pub fn pop(&self) -> Option<T> {
         // acquire the oldest position within the narrow state
         let mut state = self.narrow.load(LOAD_ORDER);
-        let (value, tail, next) = loop {
+        let (tail, next) = loop {
             //println!("Pop pre-CAS: {:x}", state);
             let s = State::unpack(state);
             if s.head == s.tail {
@@ -127,18 +124,14 @@ impl<T> SynQueue<T> {
                 CAS_ORDER,
                 LOAD_ORDER,
             ) {
-                // extract the value on success
-                Ok(_) => {
-                    let value =
-                        unsafe { self.data[s.tail as usize].assume_init_read().into_inner() };
-                    break (value, s.tail, next);
-                }
-                Err(other) => {
-                    state = other;
-                }
+                Ok(_) => break (s.tail, next),
+                Err(other) => state = other,
             }
             hint::spin_loop();
         };
+
+        // read the data
+        let value = unsafe { self.data[tail as usize].assume_init_read().into_inner() };
 
         // advance the wide state
         state = self.wide.load(LOAD_ORDER);
