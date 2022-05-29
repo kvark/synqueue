@@ -1,3 +1,5 @@
+mod other;
+
 use std::mem;
 #[cfg(not(feature = "loom"))]
 use std::{
@@ -13,6 +15,8 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
     thread,
 };
+
+pub use other::OtherQueue;
 
 const CAS_ORDER: Ordering = Ordering::AcqRel;
 const LOAD_ORDER: Ordering = Ordering::Acquire;
@@ -39,7 +43,7 @@ impl State {
     }
 }
 
-/// Fast internally syncrhonized MPMC queue.
+/// An internally syncrhonized (MPMC) queue.
 ///
 /// ## Principle
 /// The basic problem with MPMC queues on arrays is synchronizing
@@ -246,7 +250,7 @@ fn barrage() {
 
     loom::model(|| {
         const NUM_THREADS: usize = if cfg!(miri) { 2 } else { 8 };
-        const NUM_ELEMENTS: usize = if cfg!(miri) { 100 } else { 10000 };
+        const NUM_ELEMENTS: usize = if cfg!(miri) { 100 } else { 100000 };
         let sq = Arc::new(SynQueue::<usize>::new(NUM_ELEMENTS));
         let mut handles = Vec::new();
 

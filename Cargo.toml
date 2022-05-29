@@ -6,6 +6,9 @@ homepage = "https://github.com/kvark/synqueue"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+debug = true
+
 [dependencies]
 log = "0.4"
 loom = { version = "0.5", optional = true }
