@@ -4,12 +4,14 @@ use std::{
     cell::UnsafeCell,
     hint,
     sync::atomic::{AtomicUsize, Ordering},
+    thread,
 };
 #[cfg(feature = "loom")]
 use std::{
     cell::UnsafeCell,
     hint,
     sync::atomic::{AtomicUsize, Ordering},
+    thread,
 };
 
 const CAS_ORDER: Ordering = Ordering::AcqRel;
@@ -105,23 +107,35 @@ impl<T> SynQueue<T> {
             }
             hint::spin_loop();
         };
+        //println!("Push success, next head = {:x}", next);
 
         // write the data
         unsafe { UnsafeCell::raw_get(self.data[head as usize].as_ptr()).write(value) };
 
         // advance the narrow state
         state = self.narrow.load(LOAD_ORDER);
-        let mut tail = State::unpack(state).tail;
-        while let Err(other) = self.narrow.compare_exchange_weak(
-            State { head, tail }.pack(),
-            State { head: next, tail }.pack(),
-            CAS_ORDER,
-            LOAD_ORDER,
-        ) {
-            //println!("Push post-CAS: {:x}", other);
-            hint::spin_loop();
-            tail = State::unpack(other).tail;
+        //println!("Push narrow state: {:x}", state);
+        let mut s = State::unpack(state);
+        loop {
+            if s.head != head {
+                thread::yield_now();
+            }
+            match self.narrow.compare_exchange_weak(
+                State { head, ..s }.pack(),
+                State { head: next, ..s }.pack(),
+                CAS_ORDER,
+                LOAD_ORDER,
+            ) {
+                Ok(_) => break,
+                Err(other) => {
+                    //println!("Push post-CAS: {:x}", other);
+                    hint::spin_loop();
+                    s = State::unpack(other);
+                }
+            }
         }
+
+        // done
         Ok(())
     }
 
@@ -146,23 +160,35 @@ impl<T> SynQueue<T> {
             }
             hint::spin_loop();
         };
+        //println!("Pop success, next tail = {:x}", next);
 
         // read the data
         let value = unsafe { self.data[tail as usize].assume_init_read().into_inner() };
 
         // advance the wide state
         state = self.wide.load(LOAD_ORDER);
-        let mut head = State::unpack(state).head;
-        while let Err(other) = self.wide.compare_exchange_weak(
-            State { head, tail }.pack(),
-            State { head, tail: next }.pack(),
-            CAS_ORDER,
-            LOAD_ORDER,
-        ) {
-            //println!("Pop post-CAS: {:x}", other);
-            hint::spin_loop();
-            head = State::unpack(other).head;
+        let mut s = State::unpack(state);
+        //println!("Pop wide state: {:x}", state);
+        loop {
+            if s.tail != tail {
+                thread::yield_now();
+            }
+            match self.wide.compare_exchange_weak(
+                State { tail, ..s }.pack(),
+                State { tail: next, ..s }.pack(),
+                CAS_ORDER,
+                LOAD_ORDER,
+            ) {
+                Ok(_) => break,
+                Err(other) => {
+                    //println!("Pop post-CAS: {:x}", other);
+                    hint::spin_loop();
+                    s = State::unpack(other);
+                }
+            }
         }
+
+        // done
         Some(value)
     }
 }
@@ -212,9 +238,9 @@ fn smoke() {
 #[test]
 fn barrage() {
     #[cfg(feature = "loom")]
-    use loom::{sync::Arc, thread};
+    use loom::sync::Arc;
     #[cfg(not(feature = "loom"))]
-    use std::{sync::Arc, thread};
+    use std::sync::Arc;
 
     loom::model(|| {
         const NUM_THREADS: usize = if cfg!(miri) { 2 } else { 8 };
