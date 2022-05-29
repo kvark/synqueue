@@ -86,11 +86,12 @@ impl<T> SynQueue<T> {
         }
     }
 
+    #[profiling::function]
     pub fn push(&self, value: T) -> Result<(), T> {
         // acqure a new position within the wide state
         let mut state = self.wide.load(LOAD_ORDER);
         let (head, next) = loop {
-            //println!("Push pre-CAS: {:x}", state);
+            log::trace!("Push pre-CAS: {:x}", state);
             let s = State::unpack(state);
             let next = self.advance(s.head);
             if next == s.tail {
@@ -107,14 +108,14 @@ impl<T> SynQueue<T> {
             }
             hint::spin_loop();
         };
-        //println!("Push success, next head = {:x}", next);
 
+        log::trace!("Push success, next head = {:x}", next);
         // write the data
         unsafe { UnsafeCell::raw_get(self.data[head as usize].as_ptr()).write(value) };
 
         // advance the narrow state
         state = self.narrow.load(LOAD_ORDER);
-        //println!("Push narrow state: {:x}", state);
+        log::trace!("Push narrow state: {:x}", state);
         let mut s = State::unpack(state);
         loop {
             if s.head != head {
@@ -128,7 +129,7 @@ impl<T> SynQueue<T> {
             ) {
                 Ok(_) => break,
                 Err(other) => {
-                    //println!("Push post-CAS: {:x}", other);
+                    log::trace!("Push post-CAS: {:x}", other);
                     hint::spin_loop();
                     s = State::unpack(other);
                 }
@@ -139,11 +140,12 @@ impl<T> SynQueue<T> {
         Ok(())
     }
 
+    #[profiling::function]
     pub fn pop(&self) -> Option<T> {
         // acquire the oldest position within the narrow state
         let mut state = self.narrow.load(LOAD_ORDER);
         let (tail, next) = loop {
-            //println!("Pop pre-CAS: {:x}", state);
+            log::trace!("Pop pre-CAS: {:x}", state);
             let s = State::unpack(state);
             if s.head == s.tail {
                 return None;
@@ -160,15 +162,15 @@ impl<T> SynQueue<T> {
             }
             hint::spin_loop();
         };
-        //println!("Pop success, next tail = {:x}", next);
 
+        log::trace!("Pop success, next tail = {:x}", next);
         // read the data
         let value = unsafe { self.data[tail as usize].assume_init_read().into_inner() };
 
         // advance the wide state
         state = self.wide.load(LOAD_ORDER);
         let mut s = State::unpack(state);
-        //println!("Pop wide state: {:x}", state);
+        log::trace!("Pop wide state: {:x}", state);
         loop {
             if s.tail != tail {
                 thread::yield_now();
@@ -181,7 +183,7 @@ impl<T> SynQueue<T> {
             ) {
                 Ok(_) => break,
                 Err(other) => {
-                    //println!("Pop post-CAS: {:x}", other);
+                    log::trace!("Pop post-CAS: {:x}", other);
                     hint::spin_loop();
                     s = State::unpack(other);
                 }
@@ -196,7 +198,7 @@ impl<T> SynQueue<T> {
 impl<T> Drop for SynQueue<T> {
     fn drop(&mut self) {
         let state = self.wide.load(LOAD_ORDER);
-        //println!("Drop state: {:x}", state);
+        log::trace!("Drop state: {:x}", state);
         assert_eq!(state, self.narrow.load(LOAD_ORDER));
         let s = State::unpack(state);
         let mut cursor = s.tail;
