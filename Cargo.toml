@@ -1,5 +1,8 @@
 [package]
 name = "synqueue"
+description = "Internally synchronized (MPMC) queue"
+license = "MIT"
+homepage = "https://github.com/kvark/synqueue"
 version = "0.1.0"
 edition = "2021"
 
