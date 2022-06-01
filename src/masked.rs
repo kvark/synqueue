@@ -1,8 +1,5 @@
+use super::qstd::{cell::UnsafeCell, hint, sync::atomic::AtomicUsize, thread};
 use std::mem;
-#[cfg(not(feature = "loom"))]
-use std::{cell::UnsafeCell, hint, sync::atomic::AtomicUsize, thread};
-#[cfg(feature = "loom")]
-use std::{cell::UnsafeCell, hint, sync::atomic::AtomicUsize, thread};
 
 const INDEX_BITS: usize = 20;
 const INDEX_MASK: usize = (1 << INDEX_BITS) - 1;
@@ -11,35 +8,24 @@ const TOTAL_BITS: usize = mem::size_of::<usize>() * 8;
 /// Another internally syncrhonized (MPMC) queue.
 ///
 /// ## Principle
-/// This is a hybrid between the bitmask approach of crossbeam and the `SynQueue`.
+/// This is a hybrid between the bitmask approach of crossbeam and the `DoubleQueue`.
 /// It maintans the mask as a part of the atomic, keeping head and tail separate.
-/// This makes `OtherQueue` to also do 2 CAS operations every time, but unlike
-/// `SynQueue` the bit releases can complete out of order.
-pub struct OtherQueue<T> {
+/// This makes `MaskedQueue` to also do 2 CAS operations every time, but unlike
+/// `DoubleQueue` the bit releases can complete out of order.
+pub struct MaskedQueue<T> {
     head: AtomicUsize,
     tail: AtomicUsize,
     data: Box<[mem::MaybeUninit<UnsafeCell<T>>]>,
 }
 
-unsafe impl<T> Sync for OtherQueue<T> {}
+unsafe impl<T> Sync for MaskedQueue<T> {}
 
 enum BoundsCheck {
     OldValue,
     NewValue,
 }
 
-impl<T> OtherQueue<T> {
-    pub fn new(capacity: usize) -> Self {
-        assert!(capacity.is_power_of_two());
-        Self {
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
-            /// In order to differentiate between empty and full states, we
-            /// are never going to use the full array, so get one extra element.
-            data: (0..=capacity).map(|_| mem::MaybeUninit::uninit()).collect(),
-        }
-    }
-
+impl<T> MaskedQueue<T> {
     fn get_last_used_index(&self, rich_index: usize) -> usize {
         let index = rich_index & INDEX_MASK;
         let offset = (TOTAL_BITS - INDEX_BITS).saturating_sub(rich_index.leading_zeros() as usize);
@@ -120,9 +106,22 @@ impl<T> OtherQueue<T> {
             }
         }
     }
+}
+
+impl<T: Send> super::SynQueue<T> for MaskedQueue<T> {
+    fn new(capacity: usize) -> Self {
+        assert!(capacity.is_power_of_two());
+        Self {
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            /// In order to differentiate between empty and full states, we
+            /// are never going to use the full array, so get one extra element.
+            data: (0..=capacity).map(|_| mem::MaybeUninit::uninit()).collect(),
+        }
+    }
 
     #[profiling::function]
-    pub fn push(&self, value: T) -> Result<(), T> {
+    fn push(&self, value: T) -> Result<(), T> {
         let (index, next) = match self.cas_acquire(&self.head, &self.tail, BoundsCheck::NewValue) {
             Some(pair) => pair,
             None => return Err(value),
@@ -133,7 +132,7 @@ impl<T> OtherQueue<T> {
     }
 
     #[profiling::function]
-    pub fn pop(&self) -> Option<T> {
+    fn pop(&self) -> Option<T> {
         let (index, next) = self.cas_acquire(&self.tail, &self.head, BoundsCheck::OldValue)?;
         let value = unsafe { self.data[index].assume_init_read().into_inner() };
         self.cas_release(&self.tail, next, index);
@@ -141,7 +140,7 @@ impl<T> OtherQueue<T> {
     }
 }
 
-impl<T> Drop for OtherQueue<T> {
+impl<T> Drop for MaskedQueue<T> {
     fn drop(&mut self) {
         let head = self.head.load(super::LOAD_ORDER);
         let tail = self.tail.load(super::LOAD_ORDER);
@@ -160,52 +159,15 @@ impl<T> Drop for OtherQueue<T> {
 
 #[test]
 fn overflow() {
-    let sq = OtherQueue::<i32>::new(2);
-    sq.push(2).unwrap();
-    sq.push(3).unwrap();
-    assert_eq!(sq.push(4), Err(4));
+    super::test_overflow::<MaskedQueue<i32>>();
 }
 
 #[test]
 fn smoke() {
-    let sq = OtherQueue::<i32>::new(16);
-    assert_eq!(sq.pop(), None);
-    sq.push(5).unwrap();
-    sq.push(10).unwrap();
-    assert_eq!(sq.pop(), Some(5));
-    assert_eq!(sq.pop(), Some(10));
+    super::test_smoke::<MaskedQueue<i32>>();
 }
 
 #[test]
 fn barrage() {
-    #[cfg(feature = "loom")]
-    use loom::sync::Arc;
-    #[cfg(not(feature = "loom"))]
-    use std::sync::Arc;
-
-    const NUM_THREADS: usize = if cfg!(miri) { 2 } else { 8 };
-    const NUM_ELEMENTS: usize = if cfg!(miri) { 1 << 7 } else { 1 << 17 };
-    let sq = Arc::new(OtherQueue::<usize>::new(NUM_ELEMENTS));
-    let mut handles = Vec::new();
-
-    for _ in 0..NUM_THREADS {
-        let sq2 = Arc::clone(&sq);
-        handles.push(thread::spawn(move || {
-            for i in 0..NUM_ELEMENTS {
-                let _ = sq2.push(i);
-            }
-        }));
-    }
-    for _ in 0..NUM_THREADS {
-        let sq3 = Arc::clone(&sq);
-        handles.push(thread::spawn(move || {
-            for _ in 0..NUM_ELEMENTS {
-                let _ = sq3.pop();
-            }
-        }));
-    }
-
-    for jt in handles {
-        let _ = jt.join();
-    }
+    super::test_barrage::<MaskedQueue<usize>>();
 }
