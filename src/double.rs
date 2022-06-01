@@ -98,7 +98,7 @@ impl<T: Send> super::SynQueue<T> for DoubleQueue<T> {
 
         log::trace!("Push success, next head = {:x}", next);
         // write the data
-        unsafe { UnsafeCell::raw_get(self.data[head as usize].as_ptr()).write(value) };
+        unsafe { super::UnsafeCellHelper::write(self.data[head as usize].as_ptr(), value) };
 
         // advance the narrow state
         state = self.narrow.load(super::LOAD_ORDER);

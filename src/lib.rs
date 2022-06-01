@@ -1,6 +1,8 @@
+mod axel;
 mod double;
 mod masked;
 
+pub use axel::AxelQueue;
 pub use double::DoubleQueue;
 pub use masked::MaskedQueue;
 
@@ -14,10 +16,27 @@ use qstd::sync::atomic::Ordering;
 const CAS_ORDER: Ordering = Ordering::AcqRel;
 const LOAD_ORDER: Ordering = Ordering::Acquire;
 
-trait SynQueue<T>: Send + Sync {
+pub trait SynQueue<T>: Send + Sync {
     fn new(capacity: usize) -> Self;
     fn push(&self, value: T) -> Result<(), T>;
     fn pop(&self) -> Option<T>;
+}
+
+trait UnsafeCellHelper<T> {
+    unsafe fn write(this: *const Self, value: T);
+}
+
+impl<T> UnsafeCellHelper<T> for std::cell::UnsafeCell<T> {
+    unsafe fn write(this: *const Self, value: T) {
+        std::cell::UnsafeCell::raw_get(this).write(value);
+    }
+}
+
+#[cfg(feature = "loom")]
+impl<T> UnsafeCellHelper<T> for loom::cell::UnsafeCell<T> {
+    unsafe fn write(this: *const Self, value: T) {
+        (*this).with_mut(|pointer| std::ptr::write(pointer, value));
+    }
 }
 
 #[cfg(all(test, not(feature = "loom")))]
@@ -55,7 +74,7 @@ fn test_barrage<Q: SynQueue<usize> + 'static>() {
 
     loom::model(|| {
         const NUM_THREADS: usize = if cfg!(miri) { 2 } else { 8 };
-        const NUM_ELEMENTS: usize = if cfg!(miri) { 1 << 7 } else { 1 << 17 };
+        const NUM_ELEMENTS: usize = if cfg!(miri) { 1 << 7 } else { 1 << 16 };
         let sq = Arc::new(Q::new(NUM_ELEMENTS));
         let mut handles = Vec::new();
 

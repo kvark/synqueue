@@ -126,7 +126,7 @@ impl<T: Send> super::SynQueue<T> for MaskedQueue<T> {
             Some(pair) => pair,
             None => return Err(value),
         };
-        unsafe { UnsafeCell::raw_get(self.data[index].as_ptr()).write(value) };
+        unsafe { super::UnsafeCellHelper::write(self.data[index].as_ptr(), value) };
         self.cas_release(&self.head, next, index);
         return Ok(());
     }
