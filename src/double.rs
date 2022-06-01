@@ -98,7 +98,9 @@ impl<T: Send> super::SynQueue<T> for DoubleQueue<T> {
 
         log::trace!("Push success, next head = {:x}", next);
         // write the data
-        unsafe { super::UnsafeCellHelper::write(self.data[head as usize].as_ptr(), value) };
+        unsafe {
+            super::UnsafeCellHelper::write(self.data.get_unchecked(head as usize).as_ptr(), value)
+        };
 
         // advance the narrow state
         state = self.narrow.load(super::LOAD_ORDER);
@@ -152,7 +154,12 @@ impl<T: Send> super::SynQueue<T> for DoubleQueue<T> {
 
         log::trace!("Pop success, next tail = {:x}", next);
         // read the data
-        let value = unsafe { self.data[tail as usize].assume_init_read().into_inner() };
+        let value = unsafe {
+            self.data
+                .get_unchecked(tail as usize)
+                .assume_init_read()
+                .into_inner()
+        };
 
         // advance the wide state
         state = self.wide.load(super::LOAD_ORDER);

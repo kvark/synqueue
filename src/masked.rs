@@ -126,7 +126,7 @@ impl<T: Send> super::SynQueue<T> for MaskedQueue<T> {
             Some(pair) => pair,
             None => return Err(value),
         };
-        unsafe { super::UnsafeCellHelper::write(self.data[index].as_ptr(), value) };
+        unsafe { super::UnsafeCellHelper::write(self.data.get_unchecked(index).as_ptr(), value) };
         self.cas_release(&self.head, next, index);
         return Ok(());
     }
@@ -134,7 +134,12 @@ impl<T: Send> super::SynQueue<T> for MaskedQueue<T> {
     #[profiling::function]
     fn pop(&self) -> Option<T> {
         let (index, next) = self.cas_acquire(&self.tail, &self.head, BoundsCheck::OldValue)?;
-        let value = unsafe { self.data[index].assume_init_read().into_inner() };
+        let value = unsafe {
+            self.data
+                .get_unchecked(index)
+                .assume_init_read()
+                .into_inner()
+        };
         self.cas_release(&self.tail, next, index);
         Some(value)
     }

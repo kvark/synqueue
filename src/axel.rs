@@ -68,7 +68,8 @@ impl<T: Send> super::SynQueue<T> for AxelQueue<T> {
 
             index = s.head as usize;
             bit = 1 << (index % MASK_BITS);
-            let mask = self.occupation[index / MASK_BITS].load(super::LOAD_ORDER);
+            let mask =
+                unsafe { self.occupation.get_unchecked(index / MASK_BITS) }.load(super::LOAD_ORDER);
             if mask & bit == 0 {
                 match self.state.compare_exchange_weak(
                     state,
@@ -88,10 +89,11 @@ impl<T: Send> super::SynQueue<T> for AxelQueue<T> {
 
         log::trace!("Push success, next head = {:x}", next);
         // write the data
-        unsafe { super::UnsafeCellHelper::write(self.data[index].as_ptr(), value) };
+        unsafe { super::UnsafeCellHelper::write(self.data.get_unchecked(index).as_ptr(), value) };
 
-        let old = self.occupation[index / MASK_BITS].fetch_or(bit, super::CAS_ORDER);
-        assert_eq!(old & bit, 0);
+        let old = unsafe { self.occupation.get_unchecked(index / MASK_BITS) }
+            .fetch_or(bit, super::CAS_ORDER);
+        debug_assert_eq!(old & bit, 0);
 
         // done
         Ok(())
@@ -111,7 +113,8 @@ impl<T: Send> super::SynQueue<T> for AxelQueue<T> {
 
             index = s.tail as usize;
             bit = 1 << (index % MASK_BITS);
-            let mask = self.occupation[index / MASK_BITS].load(super::LOAD_ORDER);
+            let mask =
+                unsafe { self.occupation.get_unchecked(index / MASK_BITS) }.load(super::LOAD_ORDER);
             if mask & bit != 0 {
                 let next = self.advance(s.tail);
                 match self.state.compare_exchange_weak(
@@ -132,10 +135,16 @@ impl<T: Send> super::SynQueue<T> for AxelQueue<T> {
 
         log::trace!("Pop success, next tail = {:x}", next);
         // read the data
-        let value = unsafe { self.data[index].assume_init_read().into_inner() };
+        let value = unsafe {
+            self.data
+                .get_unchecked(index)
+                .assume_init_read()
+                .into_inner()
+        };
 
-        let old = self.occupation[index / MASK_BITS].fetch_and(!bit, super::CAS_ORDER);
-        assert_ne!(old & bit, 0);
+        let old = unsafe { self.occupation.get_unchecked(index / MASK_BITS) }
+            .fetch_and(!bit, super::CAS_ORDER);
+        debug_assert_ne!(old & bit, 0);
 
         // done
         Some(value)
