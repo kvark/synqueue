@@ -1,5 +1,5 @@
 use super::qstd::{cell::UnsafeCell, hint, sync::atomic::AtomicUsize, thread};
-use std::mem;
+use std::{mem, ptr};
 
 type Pointer = u32;
 const _BITS_CHECK: usize = (mem::size_of::<usize>() == 2 * mem::size_of::<Pointer>()) as usize - 1;
@@ -154,12 +154,8 @@ impl<T: Send> super::SynQueue<T> for DoubleQueue<T> {
 
         log::trace!("Pop success, next tail = {:x}", next);
         // read the data
-        let value = unsafe {
-            self.data
-                .get_unchecked(tail as usize)
-                .assume_init_read()
-                .into_inner()
-        };
+        let value =
+            unsafe { ptr::read(self.data.get_unchecked(tail as usize).as_ptr()).into_inner() };
 
         // advance the wide state
         state = self.wide.load(super::LOAD_ORDER);
@@ -197,7 +193,7 @@ impl<T> Drop for DoubleQueue<T> {
         let s = State::unpack(state);
         let mut cursor = s.tail;
         while cursor != s.head {
-            unsafe { self.data[cursor as usize].assume_init_drop() };
+            unsafe { ptr::read(self.data[cursor as usize].as_ptr()) };
             cursor = self.advance(cursor);
         }
     }

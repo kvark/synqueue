@@ -1,5 +1,5 @@
 use super::qstd::{cell::UnsafeCell, hint, sync::atomic::AtomicUsize, thread};
-use std::mem;
+use std::{mem, ptr};
 
 const INDEX_BITS: usize = 20;
 const INDEX_MASK: usize = (1 << INDEX_BITS) - 1;
@@ -134,12 +134,7 @@ impl<T: Send> super::SynQueue<T> for MaskedQueue<T> {
     #[profiling::function]
     fn pop(&self) -> Option<T> {
         let (index, next) = self.cas_acquire(&self.tail, &self.head, BoundsCheck::OldValue)?;
-        let value = unsafe {
-            self.data
-                .get_unchecked(index)
-                .assume_init_read()
-                .into_inner()
-        };
+        let value = unsafe { ptr::read(self.data.get_unchecked(index).as_ptr()).into_inner() };
         self.cas_release(&self.tail, next, index);
         Some(value)
     }
@@ -153,7 +148,7 @@ impl<T> Drop for MaskedQueue<T> {
         assert_eq!(tail & !INDEX_MASK, 0);
         let mut cursor = tail;
         while cursor != head {
-            unsafe { self.data[cursor].assume_init_drop() };
+            unsafe { ptr::read(self.data[cursor].as_ptr()) };
             cursor += 1;
             if cursor == self.data.len() {
                 cursor = 0;
