@@ -187,6 +187,12 @@ impl<T: Send> super::SynQueue<T> for DoubleQueue<T> {
         // done
         Some(value)
     }
+
+    fn is_empty(&self) -> bool {
+        let state = self.wide.load(super::LOAD_ORDER);
+        let s = State::unpack(state);
+        s.head == s.tail
+    }
 }
 
 impl<T> Drop for DoubleQueue<T> {
