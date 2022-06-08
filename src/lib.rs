@@ -20,6 +20,7 @@ pub trait SynQueue<T>: Send + Sync {
     fn new(capacity: usize) -> Self;
     fn push(&self, value: T) -> Result<(), T>;
     fn pop(&self) -> Option<T>;
+    fn is_empty(&self) -> bool;
 }
 
 trait UnsafeCellHelper<T> {

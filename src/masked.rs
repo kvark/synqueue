@@ -143,6 +143,12 @@ impl<T: Send> super::SynQueue<T> for MaskedQueue<T> {
         self.cas_release(&self.tail, next, index);
         Some(value)
     }
+
+    fn is_empty(&self) -> bool {
+        let tail = self.tail.load(super::LOAD_ORDER);
+        let head = self.head.load(super::LOAD_ORDER);
+        head == tail
+    }
 }
 
 impl<T> Drop for MaskedQueue<T> {
